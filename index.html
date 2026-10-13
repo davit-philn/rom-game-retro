@@ -79,7 +79,8 @@ const LIBRETRO = {
 const NON_ROM = /\.(xml|txt|bak|srm|sav|state\d*|cfg|png|jpe?g|mp4|nfo|db|ini|log|dat)$/i;
 
 // ---- Trạng thái ----
-const S = { root:null, roms:null, systems:[], cur:null, sel:new Set(), filter:'', urls:new Map() };
+const S = { root:null, roms:null, systems:[], cur:null, sel:new Set(), filter:'', urls:new Map(),
+  src:[], srcUrl:'', useProxy:false, proxyUrl:'https://corsproxy.io/?' };
 const $ = (id)=>document.getElementById(id);
 const esc = (s)=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const base = (n)=>n.replace(/\.[^.]+$/,'');
@@ -157,6 +158,19 @@ function renderMain(){
     <textarea id="urls" placeholder="https://…/game.gba"></textarea>
     <div class="bar"><button class="sec" id="btnUrls">Tải từ link</button></div>
   </details>
+  <details id="srcBox"><summary>🌐 Thêm game từ nguồn URL tùy chỉnh</summary>
+    <p class="mut">Nhập URL một trang danh sách thư mục (kiểu “Index of /…”). Tool lọc các link file game/nén để bạn chọn tải vào “${esc(s.name)}”. Chỉ dùng với nguồn và game bạn có quyền tải.</p>
+    <div class="bar">
+      <input type="text" id="srcUrl" placeholder="URL danh sách nguồn" style="flex:1;min-width:240px" value="${esc(S.srcUrl||'')}">
+      <button id="btnScanSrc">Quét danh sách file</button>
+    </div>
+    <div class="bar">
+      <label><input type="checkbox" id="useProxy" ${S.useProxy?'checked':''}> Dùng CORS Proxy</label>
+      <input type="text" id="proxyUrl" style="flex:1;min-width:200px" value="${esc(S.proxyUrl)}">
+      <input type="search" id="srcFlt" placeholder="Lọc kết quả…">
+    </div>
+    <div id="srcRes" class="mut"></div>
+  </details>
   <div id="prog"></div>
   <div class="grid" id="grid"></div>
   <div id="log"></div>`;
@@ -167,6 +181,12 @@ function renderMain(){
   $('btnDel').onclick=()=>deleteSelected();
   $('btnFiles').onclick=addFromFiles;
   $('btnUrls').onclick=addFromUrls;
+  $('btnScanSrc').onclick=scanSource;
+  $('srcFlt').oninput=drawSrc;
+  $('useProxy').onchange=e=>S.useProxy=e.target.checked;
+  $('proxyUrl').onchange=e=>S.proxyUrl=e.target.value.trim();
+  $('srcUrl').onchange=e=>S.srcUrl=e.target.value.trim();
+  if(S.src.length)drawSrc();
   drawGrid();
 }
 const visible=()=>S.cur.games.filter(g=>g.file.toLowerCase().includes(S.filter.toLowerCase()));
@@ -303,6 +323,77 @@ async function deleteSelected(){
   }
   if(doc)await saveGamelist(s,doc);
   await scan();
+}
+
+// ---- Nguồn URL tùy chỉnh ----
+const GAME_EXT=/\.(zip|7z|rar|gba|gbc|gb|nds|nes|fds|sfc|smc|snes|n64|z64|v64|md|gen|smd|gg|sms|sg|bin|iso|cue|chd|pce|ngp|ngc|ws|wsc|a26|a78|lnk|cso|pbp|gdi|cdi|m3u)$/i;
+const viaProxy=(u)=>S.useProxy&&S.proxyUrl?S.proxyUrl+encodeURIComponent(u):u;
+function cleanName(url){
+  let n=url.split('?')[0].split('#')[0].split('/').pop();
+  try{n=decodeURIComponent(n)}catch{}
+  n=n.replace(/[\\/:*?"<>|\u0000-\u001f]/g,'_').trim();
+  return (n&&n!=='.'&&n!=='..')?n:'';
+}
+async function scanSource(){
+  const url=$('srcUrl').value.trim();S.srcUrl=url;S.useProxy=$('useProxy').checked;S.proxyUrl=$('proxyUrl').value.trim();
+  let u;try{u=new URL(url)}catch{log('URL không hợp lệ','err');return}
+  $('srcRes').textContent='Đang quét…';
+  try{
+    const r=await fetch(viaProxy(url));
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const doc=new DOMParser().parseFromString(await r.text(),'text/html');
+    const seen=new Set(),out=[];
+    for(const a of doc.querySelectorAll('a[href]')){
+      let abs;try{abs=new URL(a.getAttribute('href'),u)}catch{continue}
+      if(!/^https?:$/.test(abs.protocol))continue;
+      const name=cleanName(abs.pathname);
+      if(!name||!GAME_EXT.test(name)||seen.has(abs.href))continue;
+      seen.add(abs.href);out.push({url:abs.href,name});
+    }
+    out.sort((a,b)=>a.name.localeCompare(b.name));
+    S.src=out;drawSrc();
+    log(`Quét xong: tìm thấy ${out.length} file.`,out.length?'ok':'err');
+  }catch(e){
+    $('srcRes').innerHTML=`<span class="err">Lỗi: ${esc(e.message)}. Nếu nguồn chặn CORS, hãy tích “Dùng CORS Proxy” rồi quét lại.</span>`;
+  }
+}
+function drawSrc(){
+  const q=($('srcFlt')?.value||'').toLowerCase();
+  const list=S.src.filter(f=>f.name.toLowerCase().includes(q));
+  if(!list.length){$('srcRes').textContent=S.src.length?'Không có file khớp bộ lọc.':'';return}
+  $('srcRes').innerHTML=`<div class="mut">${list.length}/${S.src.length} file</div>
+  <div style="max-height:320px;overflow:auto"><table style="width:100%;border-collapse:collapse">`+
+  list.map((f,i)=>`<tr style="border-top:1px solid var(--line)"><td style="padding:5px;word-break:break-all">${esc(f.name)}</td>
+    <td style="width:160px"><progress id="sp${i}" value="0" max="1" style="width:100%;display:none"></progress><span id="st${i}" class="mut"></span></td>
+    <td style="width:110px;text-align:right"><button data-i="${i}">Tải vào thẻ</button></td></tr>`).join('')+'</table></div>';
+  $('srcRes').querySelectorAll('button').forEach(b=>b.onclick=()=>downloadSrc(list[+b.dataset.i],+b.dataset.i,b));
+}
+async function downloadSrc(f,i,btn){
+  const s=S.cur,pb=$('sp'+i),st=$('st'+i);
+  btn.disabled=true;pb.style.display='';st.textContent='';
+  let w;
+  try{
+    const r=await fetch(viaProxy(f.url));
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const total=+r.headers.get('content-length')||0;
+    const fh=await s.handle.getFileHandle(f.name,{create:true});
+    w=await fh.createWritable();
+    const rd=r.body.getReader();let got=0;
+    if(!total)pb.removeAttribute('value');else pb.max=total;
+    for(;;){
+      const {done,value}=await rd.read();if(done)break;
+      await w.write(value);got+=value.length;
+      if(total)pb.value=got;st.textContent=mb(got)+(total?' / '+mb(total):'');
+    }
+    await w.close();w=null;
+    pb.style.display='none';st.innerHTML='<span class="ok">✔ '+mb(got)+'</span>';
+    log(`Đã tải ${f.name} vào ${s.name}`,'ok');
+    if(/\.(zip|7z|rar)$/i.test(f.name))log(`Lưu ý: ${f.name} là file nén, cần giải nén nếu máy không đọc trực tiếp.`);
+  }catch(e){
+    if(w)try{await w.abort()}catch{}
+    pb.style.display='none';st.innerHTML='<span class="err">Lỗi</span>';btn.disabled=false;
+    log(`Lỗi tải ${f.name}: ${e.message}. Thử bật “Dùng CORS Proxy”.`,'err');
+  }
 }
 
 // ---- Thêm game ----
