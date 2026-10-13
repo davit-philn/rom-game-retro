@@ -148,7 +148,7 @@ function renderMain(){
     <input type="search" id="flt" placeholder="Tìm game…" value="${esc(S.filter)}">
     <button class="sec" id="selAll">Chọn tất cả</button>
     <button class="sec" id="selNoImg">Chọn game thiếu ảnh</button>
-    <label title="Áp dụng khi tải từ nguồn URL và khi chọn file từ máy"><input type="checkbox" id="unzip" ${S.unzip?'checked':''}> Tự giải nén .zip</label>
+    <label title="Áp dụng khi tải từ nguồn URL và khi chọn file từ máy"><input type="checkbox" id="unzip" ${S.unzip?'checked':''}> Tự giải nén (zip/7z/rar)</label>
     <button id="btnArt" ${known?'':'disabled'}>🖼 Tải ảnh (${S.sel.size||'tất cả'})</button>
     <button class="bad" id="btnDel" ${S.sel.size?'':'disabled'}>🗑 Xóa (${S.sel.size})</button>
   </div>
@@ -365,6 +365,64 @@ async function extractZip(blob,dir,onFile){
 }
 const isZip=(n)=>/\.zip$/i.test(n);
 
+
+// ---- Giải nén .7z / .rar bằng 7-Zip WASM (chạy trong Web Worker, nạp từ CDN lần đầu) ----
+const SZ_BASE='https://cdn.jsdelivr.net/npm/7z-wasm@1.2.0/';
+async function sevenExtract(mod,blob,emit){      // chạy được cả trong worker lẫn Node (để test)
+  const FS=mod.FS;let src;
+  try{FS.mkdir('/in');FS.mount(mod.WORKERFS,{blobs:[{name:'a.bin',data:blob}]},'/in');src='/in/a.bin'}   // đọc trực tiếp, không nạp cả file vào RAM
+  catch{FS.writeFile('/a.bin',new Uint8Array(await blob.arrayBuffer()));src='/a.bin'}
+  FS.mkdir('/out');
+  try{mod.callMain(['x',src,'-o/out','-y','-bd'])}catch(e){if(e&&e.status!==undefined&&e.status!==0)mod.__err=(mod.__err||'')+' (mã '+e.status+')'}
+  const walk=async(d)=>{
+    for(const n of FS.readdir(d)){
+      if(n==='.'||n==='..')continue;
+      const path=d+'/'+n,st=FS.stat(path);
+      if(FS.isDir(st.mode))await walk(path);
+      else{await emit(n,FS.readFile(path));FS.unlink(path)}
+    }
+  };
+  await walk('/out');
+}
+function extractWithSevenZip(blob,onFile){
+  const src=`importScripts(${JSON.stringify(SZ_BASE+'7zz.umd.js')});
+    const sevenExtract=${sevenExtract.toString()};
+    onmessage=async(ev)=>{
+      const errs=[];let n=0;
+      try{
+        const mod=await SevenZip({locateFile:f=>${JSON.stringify(SZ_BASE)}+f,print:()=>{},printErr:l=>errs.push(l),stdin:()=>null});
+        await sevenExtract(mod,ev.data,async(name,buf)=>{n++;postMessage({t:'file',name,buf},[buf.buffer])});
+        if(!n)throw new Error(errs.filter(Boolean).slice(-3).join(' ')||'không giải nén được file nào (có thể có mật khẩu hoặc file hỏng)');
+        postMessage({t:'done'});
+      }catch(e){postMessage({t:'error',msg:String(e&&e.message||e)})}
+    };`;
+  const url=URL.createObjectURL(new Blob([src],{type:'text/javascript'}));
+  const wk=new Worker(url);
+  return new Promise((res,rej)=>{
+    const done=[];let chain=Promise.resolve();
+    const fail=(m)=>{wk.terminate();URL.revokeObjectURL(url);rej(new Error(m))};
+    wk.onerror=(e)=>fail('Không nạp được bộ giải nén 7-Zip (cần Internet): '+(e.message||''));
+    wk.onmessage=(ev)=>{
+      const m=ev.data;
+      if(m.t==='file')chain=chain.then(()=>onFile(m.name,m.buf)).then(x=>{if(x)done.push(x)}).catch(e=>fail(e.message));
+      else if(m.t==='error')fail(m.msg);
+      else if(m.t==='done')chain.then(()=>{wk.terminate();URL.revokeObjectURL(url);res(done)});
+    };
+    wk.postMessage(blob);
+  });
+}
+// Giải nén zip/7z/rar vào thư mục dir (bỏ đường dẫn con, chỉ giữ tên file)
+const isArchive=(n)=>/\.(zip|7z|rar)$/i.test(n);
+async function extractAny(blob,name,dir,onFile){
+  if(isZip(name))return extractZip(blob,dir,onFile);
+  return extractWithSevenZip(blob,async(entry,buf)=>{
+    const fname=cleanName(entry);if(!fname)return null;
+    const fh=await dir.getFileHandle(fname,{create:true});
+    const w=await fh.createWritable();await w.write(buf);await w.close();
+    if(onFile)onFile(fname);return fname;
+  });
+}
+
 // ---- Nguồn URL tùy chỉnh ----
 const GAME_EXT=/\.(zip|7z|rar|gba|gbc|gb|nds|nes|fds|sfc|smc|snes|n64|z64|v64|md|gen|smd|gg|sms|sg|bin|iso|cue|chd|pce|ngp|ngc|ws|wsc|a26|a78|lnk|cso|pbp|gdi|cdi|m3u)$/i;
 const viaProxy=(u)=>S.useProxy&&S.proxyUrl?S.proxyUrl+encodeURIComponent(u):u;
@@ -428,14 +486,13 @@ async function downloadSrc(f,i,btn){
     await w.close();w=null;
     pb.style.display='none';st.innerHTML='<span class="ok">✔ '+mb(got)+'</span>';
     log(`Đã tải ${f.name} vào ${s.name}`,'ok');
-    if(S.unzip&&isZip(f.name)){
+    if(S.unzip&&isArchive(f.name)){
       st.textContent='Đang giải nén…';
-      const names=await extractZip(await fh.getFile(),s.handle,n=>log('  giải nén: '+n));
+      const names=await extractAny(await fh.getFile(),f.name,s.handle,n=>log('  giải nén: '+n));
       await s.handle.removeEntry(f.name);
       st.innerHTML='<span class="ok">✔ giải nén '+names.length+' file</span>';
-      log(`Đã giải nén ${f.name} (${names.length} file) và xóa file zip.`,'ok');
-    } else if(/\.(7z|rar)$/i.test(f.name))log(`Lưu ý: ${f.name} là .7z/.rar, tool chưa giải nén được loại này.`);
-    else if(isZip(f.name))log(`${f.name} giữ nguyên dạng zip (đang tắt tự giải nén).`);
+      log(`Đã giải nén ${f.name} (${names.length} file) và xóa file nén.`,'ok');
+    } else if(isArchive(f.name))log(`${f.name} giữ nguyên dạng nén (đang tắt tự giải nén).`);
   }catch(e){
     if(w)try{await w.abort()}catch{}
     pb.style.display='none';st.innerHTML='<span class="err">Lỗi</span>';btn.disabled=false;
@@ -454,7 +511,7 @@ async function addFromFiles(){
   for(const h of hs){
     const f=await h.getFile();
     try{
-      if(S.unzip&&isZip(f.name)){log('Đang giải nén '+f.name+'…');const n=await extractZip(f,S.cur.handle,x=>log('  giải nén: '+x));log(`OK ${f.name}: ${n.length} file`,'ok')}
+      if(S.unzip&&isArchive(f.name)){log('Đang giải nén '+f.name+'…');const n=await extractAny(f,f.name,S.cur.handle,x=>log('  giải nén: '+x));log(`OK ${f.name}: ${n.length} file`,'ok')}
       else{log('Đang chép '+f.name+' ('+mb(f.size)+')…');await writeFileTo(S.cur.handle,f.name,f.stream());log('OK '+f.name,'ok')}
     }
     catch(e){log('Lỗi '+f.name+': '+e.message,'err')}
