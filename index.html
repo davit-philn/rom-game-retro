@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R36H Card Manager</title>
+<style>
+:root{--bg:#12141a;--panel:#1b1f29;--line:#2c3242;--fg:#e6e9f0;--mut:#8b93a7;--acc:#4ea1ff;--ok:#3ecf8e;--bad:#ff5d5d}
+@media (prefers-color-scheme: light){:root{--bg:#f4f6fa;--panel:#fff;--line:#d9deea;--fg:#1b2030;--mut:#5d6578}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
+header{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+h1{font-size:18px;margin:0;flex:1}
+button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit}
+button.sec{background:transparent;color:var(--fg);border:1px solid var(--line)}
+button.bad{background:var(--bad)}
+button:disabled{opacity:.45;cursor:not-allowed}
+main{display:grid;grid-template-columns:230px 1fr;min-height:calc(100vh - 60px)}
+@media(max-width:760px){main{grid-template-columns:1fr}}
+aside{border-right:1px solid var(--line);padding:10px;overflow:auto}
+.sys{padding:7px 9px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;gap:8px}
+.sys:hover{background:var(--panel)} .sys.on{background:var(--panel);outline:1px solid var(--acc)}
+.sys small{color:var(--mut)}
+section{padding:14px 16px;min-width:0}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+input[type=text],input[type=search],select,textarea{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font:inherit}
+textarea{width:100%;min-height:80px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;position:relative;cursor:pointer}
+.card.sel{outline:2px solid var(--acc)}
+.card .img{aspect-ratio:1/1;background:#0003;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:12px}
+.card img{width:100%;height:100%;object-fit:contain}
+.card .t{padding:6px 8px;font-size:12px;word-break:break-word}
+.card .t small{color:var(--mut);display:block}
+.card input{position:absolute;top:6px;left:6px;width:16px;height:16px}
+details{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:0 0 12px}
+summary{cursor:pointer;font-weight:600}
+#log{background:#000;color:#9fe;font:12px/1.4 ui-monospace,monospace;padding:8px;border-radius:6px;max-height:180px;overflow:auto;white-space:pre-wrap;margin-top:10px}
+.mut{color:var(--mut)} .ok{color:var(--ok)} .err{color:var(--bad)}
+.empty{padding:50px 10px;text-align:center;color:var(--mut)}
+progress{width:200px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎮 R36H Card Manager <span class="mut" style="font-weight:400">(ArkOS)</span></h1>
+  <span id="cardInfo" class="mut">Chưa chọn thẻ nhớ</span>
+  <button id="pick">📂 Chọn thẻ nhớ</button>
+  <button id="rescan" class="sec" disabled>↻ Quét lại</button>
+</header>
+<main>
+  <aside id="sysList"><div class="mut">Bấm “Chọn thẻ nhớ” rồi chọn phân vùng <b>EASYROMS</b> (hoặc thư mục <code>roms</code>).</div></aside>
+  <section id="content"><div class="empty">
+    Cắm thẻ nhớ vào máy tính → bấm <b>Chọn thẻ nhớ</b> → cho phép đọc/ghi.<br>
+    Cần Chrome hoặc Edge (bản máy tính).
+  </div></section>
+</main>
+
+<script>
+'use strict';
+// ---- Hệ máy ArkOS -> repo libretro-thumbnails ----
+const LIBRETRO = {
+  nes:'Nintendo - Nintendo Entertainment System', fds:'Nintendo - Family Computer Disk System',
+  snes:'Nintendo - Super Nintendo Entertainment System', sfc:'Nintendo - Super Nintendo Entertainment System',
+  gb:'Nintendo - Game Boy', gbc:'Nintendo - Game Boy Color', gba:'Nintendo - Game Boy Advance',
+  n64:'Nintendo - Nintendo 64', nds:'Nintendo - Nintendo DS', virtualboy:'Nintendo - Virtual Boy',
+  mastersystem:'Sega - Master System - Mark III', megadrive:'Sega - Mega Drive - Genesis',
+  genesis:'Sega - Mega Drive - Genesis', gamegear:'Sega - Game Gear', segacd:'Sega - Mega-CD - Sega CD',
+  sega32x:'Sega - 32X', saturn:'Sega - Saturn', dreamcast:'Sega - Dreamcast', sg1000:'Sega - SG-1000',
+  psx:'Sony - PlayStation', psp:'Sony - PlayStation Portable',
+  pcengine:'NEC - PC Engine - TurboGrafx 16', pcenginecd:'NEC - PC Engine CD - TurboGrafx-CD',
+  atari2600:'Atari - 2600', atari5200:'Atari - 5200', atari7800:'Atari - 7800', atarilynx:'Atari - Lynx',
+  neogeo:'SNK - Neo Geo', ngp:'SNK - Neo Geo Pocket', ngpc:'SNK - Neo Geo Pocket Color',
+  wonderswan:'Bandai - WonderSwan', wonderswancolor:'Bandai - WonderSwan Color',
+  arcade:'MAME', mame:'MAME', fbneo:'FBNeo - Arcade Games', cps1:'FBNeo - Arcade Games',
+  cps2:'FBNeo - Arcade Games', cps3:'FBNeo - Arcade Games', colecovision:'Coleco - ColecoVision',
+  intellivision:'Mattel - Intellivision', msx:'Microsoft - MSX', msx2:'Microsoft - MSX2'
+};
+const NON_ROM = /\.(xml|txt|bak|srm|sav|state\d*|cfg|png|jpe?g|mp4|nfo|db|ini|log|dat)$/i;
+
+// ---- Trạng thái ----
+const S = { root:null, roms:null, systems:[], cur:null, sel:new Set(), filter:'', urls:new Map() };
+const $ = (id)=>document.getElementById(id);
+const esc = (s)=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const base = (n)=>n.replace(/\.[^.]+$/,'');
+const mb = (b)=>b>1e9?(b/1e9).toFixed(2)+' GB':(b/1e6).toFixed(1)+' MB';
+function log(msg,cls=''){const l=$('log');if(!l)return;l.insertAdjacentHTML('beforeend',`<div class="${cls}">${esc(msg)}</div>`);l.scrollTop=l.scrollHeight}
+
+async function tryDir(h,name,create=false){try{return await h.getDirectoryHandle(name,{create})}catch{return null}}
+async function tryFile(h,name){try{return await h.getFileHandle(name)}catch{return null}}
+async function* entries(h){for await(const [n,e] of h.entries())yield [n,e]}
+
+// ---- Chọn thẻ ----
+$('pick').onclick = async ()=>{
+  if(!window.showDirectoryPicker){alert('Trình duyệt không hỗ trợ. Hãy dùng Chrome hoặc Edge trên máy tính.');return}
+  try{
+    S.root = await showDirectoryPicker({mode:'readwrite'});
+  }catch{return}
+  S.roms = (await tryDir(S.root,'roms')) || S.root;   // ArkOS: EASYROMS có thư mục hệ máy ở gốc
+  $('cardInfo').textContent = '📀 '+S.root.name+(S.roms!==S.root?' / roms':'');
+  $('rescan').disabled=false;
+  await scan();
+};
+$('rescan').onclick = scan;
+
+async function scan(){
+  $('sysList').innerHTML='<div class="mut">Đang quét…</div>';
+  const systems=[];
+  for await(const [name,h] of entries(S.roms)){
+    if(h.kind!=='directory'||name.startsWith('.')||/^(images|videos|system volume information|\$recycle\.bin)$/i.test(name))continue;
+    const sys={name,handle:h,games:[]};
+    const imgs=await tryDir(h,'images');
+    const imgSet=new Set();
+    if(imgs)for await(const [n] of entries(imgs))imgSet.add(n);
+    for await(const [fn,fh] of entries(h)){
+      if(fh.kind!=='file'||fn.startsWith('.')||NON_ROM.test(fn))continue;
+      const f=await fh.getFile();
+      const b=base(fn);
+      sys.games.push({file:fn,base:b,size:f.size,hasImg:imgSet.has(b+'-image.png'),hasThumb:imgSet.has(b+'-thumb.png'),hasMarquee:imgSet.has(b+'-marquee.png')});
+    }
+    sys.games.sort((a,c)=>a.file.localeCompare(c.file));
+    systems.push(sys);
+  }
+  systems.sort((a,b)=>a.name.localeCompare(b.name));
+  S.systems=systems;
+  if(!systems.find(s=>s===S.cur)) S.cur=systems.find(s=>s.games.length)||systems[0]||null;
+  else S.cur=systems.find(s=>s.name===S.cur.name);
+  S.sel.clear();
+  renderSys();renderMain();
+}
+
+function renderSys(){
+  if(!S.systems.length){$('sysList').innerHTML='<div class="mut">Không thấy thư mục hệ máy nào. Hãy chọn đúng phân vùng EASYROMS.</div>';return}
+  $('sysList').innerHTML=S.systems.map(s=>`<div class="sys ${s===S.cur?'on':''}" data-n="${esc(s.name)}"><span>${esc(s.name)}</span><small>${s.games.length}</small></div>`).join('');
+  $('sysList').querySelectorAll('.sys').forEach(el=>el.onclick=()=>{S.cur=S.systems.find(s=>s.name===el.dataset.n);S.sel.clear();renderSys();renderMain()});
+}
+
+// ---- Giao diện chính ----
+function renderMain(){
+  const s=S.cur; if(!s){$('content').innerHTML='<div class="empty">Chưa có hệ máy.</div>';return}
+  const total=s.games.reduce((a,g)=>a+g.size,0);
+  const known=LIBRETRO[s.name.toLowerCase()];
+  $('content').innerHTML=`
+  <div class="bar">
+    <b style="font-size:16px">${esc(s.name)}</b>
+    <span class="mut">${s.games.length} game · ${mb(total)} ${known?'':'· ⚠ chưa có ánh xạ ảnh cho hệ này'}</span>
+    <input type="search" id="flt" placeholder="Tìm game…" value="${esc(S.filter)}">
+    <button class="sec" id="selAll">Chọn tất cả</button>
+    <button class="sec" id="selNoImg">Chọn game thiếu ảnh</button>
+    <button id="btnArt" ${known?'':'disabled'}>🖼 Tải ảnh (${S.sel.size||'tất cả'})</button>
+    <button class="bad" id="btnDel" ${S.sel.size?'':'disabled'}>🗑 Xóa (${S.sel.size})</button>
+  </div>
+  <details><summary>➕ Thêm game vào “${esc(s.name)}”</summary>
+    <p class="mut">Chỉ thêm game bạn sở hữu hợp pháp (bản backup từ băng/đĩa của bạn).</p>
+    <div class="bar"><button class="sec" id="btnFiles">Chọn file từ máy tính…</button>
+    <span class="mut">hoặc dán link tải trực tiếp (mỗi dòng 1 link; trang web nguồn phải cho phép CORS, nếu không hãy tải về máy rồi chọn file)</span></div>
+    <textarea id="urls" placeholder="https://…/game.gba"></textarea>
+    <div class="bar"><button class="sec" id="btnUrls">Tải từ link</button></div>
+  </details>
+  <div id="prog"></div>
+  <div class="grid" id="grid"></div>
+  <div id="log"></div>`;
+  $('flt').oninput=e=>{S.filter=e.target.value;drawGrid()};
+  $('selAll').onclick=()=>{visible().forEach(g=>S.sel.add(g.file));refreshBtns();drawGrid()};
+  $('selNoImg').onclick=()=>{S.sel.clear();s.games.filter(g=>!g.hasImg).forEach(g=>S.sel.add(g.file));refreshBtns();drawGrid()};
+  $('btnArt').onclick=()=>downloadArt();
+  $('btnDel').onclick=()=>deleteSelected();
+  $('btnFiles').onclick=addFromFiles;
+  $('btnUrls').onclick=addFromUrls;
+  drawGrid();
+}
+const visible=()=>S.cur.games.filter(g=>g.file.toLowerCase().includes(S.filter.toLowerCase()));
+function refreshBtns(){
+  $('btnDel').disabled=!S.sel.size;$('btnDel').textContent=`🗑 Xóa (${S.sel.size})`;
+  $('btnArt').textContent=`🖼 Tải ảnh (${S.sel.size||'tất cả'})`;
+}
+async function drawGrid(){
+  const grid=$('grid');
+  const list=visible();
+  if(!list.length){grid.innerHTML='<div class="empty" style="grid-column:1/-1">Không có game.</div>';return}
+  grid.innerHTML=list.map((g,i)=>`<div class="card ${S.sel.has(g.file)?'sel':''}" data-f="${esc(g.file)}">
+    <input type="checkbox" ${S.sel.has(g.file)?'checked':''}>
+    <div class="img" data-b="${esc(g.base)}">${g.hasImg?'':'chưa có ảnh'}</div>
+    <div class="t">${esc(g.base)}<small>${mb(g.size)}</small></div></div>`).join('');
+  grid.querySelectorAll('.card').forEach(c=>c.onclick=()=>{
+    const f=c.dataset.f; S.sel.has(f)?S.sel.delete(f):S.sel.add(f);
+    c.classList.toggle('sel');c.querySelector('input').checked=S.sel.has(f);refreshBtns();
+  });
+  // nạp ảnh từ thẻ (lười, theo tầm nhìn)
+  const imgDir=await tryDir(S.cur.handle,'images');
+  if(!imgDir)return;
+  const io=new IntersectionObserver(async(ents)=>{
+    for(const e of ents){ if(!e.isIntersecting)continue; io.unobserve(e.target);
+      const b=e.target.dataset.b;
+      const fh=await tryFile(imgDir,b+'-image.png'); if(!fh)continue;
+      const url=URL.createObjectURL(await fh.getFile());
+      S.urls.set(b,url); e.target.innerHTML=`<img src="${url}" alt="">`;
+    }
+  },{rootMargin:'200px'});
+  grid.querySelectorAll('.img').forEach(el=>io.observe(el));
+}
+
+// ---- gamelist.xml (giữ nguyên các mục cũ để game vẫn load) ----
+async function loadGamelist(sys){
+  const fh=await tryFile(sys.handle,'gamelist.xml');
+  let doc;
+  if(fh){
+    const txt=await (await fh.getFile()).text();
+    doc=new DOMParser().parseFromString(txt,'text/xml');
+    if(doc.querySelector('parsererror')) throw new Error('gamelist.xml bị lỗi cú pháp, dừng để không làm hỏng');
+    if(!await tryFile(sys.handle,'gamelist.xml.bak')){ // sao lưu 1 lần
+      const b=await sys.handle.getFileHandle('gamelist.xml.bak',{create:true});
+      const w=await b.createWritable();await w.write(txt);await w.close();
+    }
+  } else doc=new DOMParser().parseFromString('<?xml version="1.0"?><gameList></gameList>','text/xml');
+  return doc;
+}
+async function saveGamelist(sys,doc){
+  const xml=new XMLSerializer().serializeToString(doc);
+  const fh=await sys.handle.getFileHandle('gamelist.xml',{create:true});
+  const w=await fh.createWritable();await w.write(xml);await w.close();
+}
+function gameNode(doc,file){
+  const path='./'+file;
+  const root=doc.documentElement;
+  for(const g of root.getElementsByTagName('game')){
+    const p=g.getElementsByTagName('path')[0];
+    if(p&&p.textContent.trim()===path)return g;
+  }
+  const g=doc.createElement('game');
+  const p=doc.createElement('path');p.textContent=path;g.appendChild(p);
+  const n=doc.createElement('name');n.textContent=base(file).replace(/\s*\(.*?\)|\s*\[.*?\]/g,'').trim();g.appendChild(n);
+  root.appendChild(g);return g;
+}
+function setTag(doc,g,tag,val){
+  let el=g.getElementsByTagName(tag)[0];
+  if(!el){el=doc.createElement(tag);g.appendChild(el)}
+  el.textContent=val;
+}
+
+// ---- Tải ảnh (libretro-thumbnails, có CORS qua raw.githubusercontent) ----
+const lrName=(n)=>n.replace(/[&*\/:`<>?\\|"]/g,'_');
+const TYPES=[['Named_Boxarts','image'],['Named_Snaps','thumb'],['Named_Titles','marquee']];
+function candidates(b){
+  const full=b, noTags=b.replace(/\s*\[.*?\]/g,'').trim();
+  const firstRegion=noTags.replace(/^(.*?\([^)]*\)).*$/,'$1').trim();
+  return [...new Set([full,noTags,firstRegion])].map(lrName);
+}
+async function fetchPng(repo,type,names){
+  for(const n of names){
+    const url=`https://raw.githubusercontent.com/libretro-thumbnails/${encodeURIComponent(repo.replace(/ /g,'_'))}/master/${type}/${encodeURIComponent(n)}.png`;
+    try{const r=await fetch(url);if(r.ok)return await r.blob()}catch{}
+  }
+  return null;
+}
+async function downloadArt(){
+  const s=S.cur,repo=LIBRETRO[s.name.toLowerCase()];
+  const list=(S.sel.size?s.games.filter(g=>S.sel.has(g.file)):s.games);
+  if(!list.length)return;
+  const overwrite=list.length===S.sel.size && confirm('Ghi đè ảnh đã có? (OK = ghi đè, Hủy = chỉ tải ảnh còn thiếu)');
+  let doc; try{doc=await loadGamelist(s)}catch(e){log(e.message,'err');return}
+  const imgDir=await s.handle.getDirectoryHandle('images',{create:true});
+  const prog=$('prog');prog.innerHTML=`<progress id="pb" max="${list.length}" value="0"></progress> <span id="pt"></span>`;
+  let done=0,got=0,miss=0;
+  const work=async(g)=>{
+    const names=candidates(g.base); const node=gameNode(doc,g.file);
+    for(const [type,key] of TYPES){
+      const fname=`${g.base}-${key}.png`;
+      const has=key==='image'?g.hasImg:key==='thumb'?g.hasThumb:g.hasMarquee;
+      if(has&&!overwrite){setTag(doc,node,key==='image'?'image':key==='thumb'?'thumbnail':'marquee','./images/'+fname);continue}
+      const blob=await fetchPng(repo,type,names);
+      if(!blob){ if(key==='image'){miss++;log('Không thấy ảnh: '+g.base,'err')} continue }
+      const fh=await imgDir.getFileHandle(fname,{create:true});
+      const w=await fh.createWritable();await w.write(blob);await w.close();
+      setTag(doc,node,key==='image'?'image':key==='thumb'?'thumbnail':'marquee','./images/'+fname);
+      if(key==='image'){got++;g.hasImg=true} if(key==='thumb')g.hasThumb=true; if(key==='marquee')g.hasMarquee=true;
+    }
+    done++;$('pb').value=done;$('pt').textContent=`${done}/${list.length}`;
+  };
+  const q=[...list];await Promise.all(Array.from({length:4},async()=>{while(q.length)await work(q.shift())}));
+  await saveGamelist(s,doc);
+  log(`Xong: ${got} game có ảnh mới, ${miss} game không tìm thấy ảnh. gamelist.xml đã cập nhật (bản gốc lưu ở gamelist.xml.bak).`,'ok');
+  drawGrid();
+}
+
+// ---- Xóa ----
+async function deleteSelected(){
+  const s=S.cur,files=[...S.sel]; if(!files.length)return;
+  if(!confirm(`Xóa vĩnh viễn ${files.length} game khỏi thẻ nhớ (kèm ảnh và mục trong gamelist)?\nKhông thể hoàn tác.`))return;
+  let doc=null;try{doc=await loadGamelist(s)}catch(e){log(e.message,'err')}
+  const imgDir=await tryDir(s.handle,'images');
+  for(const f of files){
+    try{
+      await s.handle.removeEntry(f);
+      const b=base(f);
+      if(imgDir)for(const k of ['image','thumb','marquee'])try{await imgDir.removeEntry(`${b}-${k}.png`)}catch{}
+      if(doc){for(const g of [...doc.getElementsByTagName('game')]){
+        const p=g.getElementsByTagName('path')[0];
+        if(p&&p.textContent.trim()==='./'+f)g.remove();
+      }}
+      log('Đã xóa '+f,'ok');
+    }catch(e){log('Lỗi xóa '+f+': '+e.message,'err')}
+  }
+  if(doc)await saveGamelist(s,doc);
+  await scan();
+}
+
+// ---- Thêm game ----
+async function writeFileTo(dir,name,data){
+  const fh=await dir.getFileHandle(name,{create:true});
+  const w=await fh.createWritable();
+  if(data instanceof ReadableStream)await data.pipeTo(w);else{await w.write(data);await w.close()}
+}
+async function addFromFiles(){
+  let hs;try{hs=await showOpenFilePicker({multiple:true})}catch{return}
+  for(const h of hs){
+    const f=await h.getFile();
+    try{log('Đang chép '+f.name+' ('+mb(f.size)+')…');await writeFileTo(S.cur.handle,f.name,f.stream());log('OK '+f.name,'ok')}
+    catch(e){log('Lỗi '+f.name+': '+e.message,'err')}
+  }
+  await scan();
+}
+async function addFromUrls(){
+  const urls=$('urls').value.split('\n').map(x=>x.trim()).filter(Boolean);
+  for(const u of urls){
+    try{
+      const name=decodeURIComponent(new URL(u).pathname.split('/').pop())||'download.bin';
+      log('Đang tải '+name+'…');
+      const r=await fetch(u);if(!r.ok)throw new Error('HTTP '+r.status);
+      await writeFileTo(S.cur.handle,name,r.body);log('OK '+name,'ok');
+    }catch(e){log('Lỗi '+u+': '+e.message+' (có thể bị chặn CORS — tải về máy rồi dùng “Chọn file”)','err')}
+  }
+  await scan();
+}
+</script>
+</body>
+</html>
