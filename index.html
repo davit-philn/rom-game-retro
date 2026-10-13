@@ -80,7 +80,7 @@ const NON_ROM = /\.(xml|txt|bak|srm|sav|state\d*|cfg|png|jpe?g|mp4|nfo|db|ini|lo
 
 // ---- Trạng thái ----
 const S = { root:null, roms:null, systems:[], cur:null, sel:new Set(), filter:'', urls:new Map(),
-  src:[], srcUrl:'', useProxy:false, proxyUrl:'https://corsproxy.io/?' };
+  src:[], srcUrl:'', useProxy:false, unzip:true, proxyUrl:'https://corsproxy.io/?' };
 const $ = (id)=>document.getElementById(id);
 const esc = (s)=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const base = (n)=>n.replace(/\.[^.]+$/,'');
@@ -148,6 +148,7 @@ function renderMain(){
     <input type="search" id="flt" placeholder="Tìm game…" value="${esc(S.filter)}">
     <button class="sec" id="selAll">Chọn tất cả</button>
     <button class="sec" id="selNoImg">Chọn game thiếu ảnh</button>
+    <label title="Áp dụng khi tải từ nguồn URL và khi chọn file từ máy"><input type="checkbox" id="unzip" ${S.unzip?'checked':''}> Tự giải nén .zip</label>
     <button id="btnArt" ${known?'':'disabled'}>🖼 Tải ảnh (${S.sel.size||'tất cả'})</button>
     <button class="bad" id="btnDel" ${S.sel.size?'':'disabled'}>🗑 Xóa (${S.sel.size})</button>
   </div>
@@ -181,6 +182,7 @@ function renderMain(){
   $('btnDel').onclick=()=>deleteSelected();
   $('btnFiles').onclick=addFromFiles;
   $('btnUrls').onclick=addFromUrls;
+  $('unzip').onchange=e=>S.unzip=e.target.checked;
   $('btnScanSrc').onclick=scanSource;
   $('srcFlt').oninput=drawSrc;
   $('useProxy').onchange=e=>S.useProxy=e.target.checked;
@@ -325,6 +327,44 @@ async function deleteSelected(){
   await scan();
 }
 
+
+// ---- Giải nén .zip (không cần thư viện: dùng DecompressionStream của trình duyệt) ----
+async function extractZip(blob,dir,onFile){
+  const tail=new DataView(await blob.slice(Math.max(0,blob.size-70000)).arrayBuffer());
+  let e=-1;for(let i=tail.byteLength-22;i>=0;i--)if(tail.getUint32(i,true)===0x06054b50){e=i;break}
+  if(e<0)throw new Error('Không phải file zip hợp lệ');
+  const count=tail.getUint16(e+10,true),cdSize=tail.getUint32(e+12,true),cdOff=tail.getUint32(e+16,true);
+  if(count===0xFFFF||cdOff===0xFFFFFFFF)throw new Error('Zip64 chưa được hỗ trợ');
+  const cd=new DataView(await blob.slice(cdOff,cdOff+cdSize).arrayBuffer());
+  const dec=new TextDecoder('utf-8');
+  const ents=[];let p=0;
+  for(let i=0;i<count;i++){
+    if(cd.getUint32(p,true)!==0x02014b50)throw new Error('Danh mục zip bị hỏng');
+    const flags=cd.getUint16(p+8,true),method=cd.getUint16(p+10,true),csz=cd.getUint32(p+20,true),
+      nl=cd.getUint16(p+28,true),el=cd.getUint16(p+30,true),cl=cd.getUint16(p+32,true),off=cd.getUint32(p+42,true);
+    const name=dec.decode(new Uint8Array(cd.buffer,p+46,nl));
+    ents.push({flags,method,csz,off,name});p+=46+nl+el+cl;
+  }
+  const done=[];
+  for(const en of ents){
+    if(en.name.endsWith('/'))continue;
+    const fname=cleanName(en.name.replace(/\\/g,'/'));   // chỉ lấy tên file, bỏ đường dẫn thư mục
+    if(!fname)continue;
+    if(en.flags&1)throw new Error(en.name+': zip có mật khẩu, không giải nén được');
+    if(en.method!==0&&en.method!==8)throw new Error(en.name+': kiểu nén không hỗ trợ ('+en.method+')');
+    const lh=new DataView(await blob.slice(en.off,en.off+30).arrayBuffer());
+    const start=en.off+30+lh.getUint16(26,true)+lh.getUint16(28,true);
+    let st=blob.slice(start,start+en.csz).stream();
+    if(en.method===8)st=st.pipeThrough(new DecompressionStream('deflate-raw'));
+    const fh=await dir.getFileHandle(fname,{create:true});
+    const w=await fh.createWritable();
+    try{await st.pipeTo(w)}catch(err){try{await dir.removeEntry(fname)}catch{};throw new Error(fname+': '+err.message)}
+    done.push(fname);if(onFile)onFile(fname);
+  }
+  return done;
+}
+const isZip=(n)=>/\.zip$/i.test(n);
+
 // ---- Nguồn URL tùy chỉnh ----
 const GAME_EXT=/\.(zip|7z|rar|gba|gbc|gb|nds|nes|fds|sfc|smc|snes|n64|z64|v64|md|gen|smd|gg|sms|sg|bin|iso|cue|chd|pce|ngp|ngc|ws|wsc|a26|a78|lnk|cso|pbp|gdi|cdi|m3u)$/i;
 const viaProxy=(u)=>S.useProxy&&S.proxyUrl?S.proxyUrl+encodeURIComponent(u):u;
@@ -376,7 +416,7 @@ async function downloadSrc(f,i,btn){
     const r=await fetch(viaProxy(f.url));
     if(!r.ok)throw new Error('HTTP '+r.status);
     const total=+r.headers.get('content-length')||0;
-    const fh=await s.handle.getFileHandle(f.name,{create:true});
+    var fh=await s.handle.getFileHandle(f.name,{create:true});
     w=await fh.createWritable();
     const rd=r.body.getReader();let got=0;
     if(!total)pb.removeAttribute('value');else pb.max=total;
@@ -388,7 +428,14 @@ async function downloadSrc(f,i,btn){
     await w.close();w=null;
     pb.style.display='none';st.innerHTML='<span class="ok">✔ '+mb(got)+'</span>';
     log(`Đã tải ${f.name} vào ${s.name}`,'ok');
-    if(/\.(zip|7z|rar)$/i.test(f.name))log(`Lưu ý: ${f.name} là file nén, cần giải nén nếu máy không đọc trực tiếp.`);
+    if(S.unzip&&isZip(f.name)){
+      st.textContent='Đang giải nén…';
+      const names=await extractZip(await fh.getFile(),s.handle,n=>log('  giải nén: '+n));
+      await s.handle.removeEntry(f.name);
+      st.innerHTML='<span class="ok">✔ giải nén '+names.length+' file</span>';
+      log(`Đã giải nén ${f.name} (${names.length} file) và xóa file zip.`,'ok');
+    } else if(/\.(7z|rar)$/i.test(f.name))log(`Lưu ý: ${f.name} là .7z/.rar, tool chưa giải nén được loại này.`);
+    else if(isZip(f.name))log(`${f.name} giữ nguyên dạng zip (đang tắt tự giải nén).`);
   }catch(e){
     if(w)try{await w.abort()}catch{}
     pb.style.display='none';st.innerHTML='<span class="err">Lỗi</span>';btn.disabled=false;
@@ -406,7 +453,10 @@ async function addFromFiles(){
   let hs;try{hs=await showOpenFilePicker({multiple:true})}catch{return}
   for(const h of hs){
     const f=await h.getFile();
-    try{log('Đang chép '+f.name+' ('+mb(f.size)+')…');await writeFileTo(S.cur.handle,f.name,f.stream());log('OK '+f.name,'ok')}
+    try{
+      if(S.unzip&&isZip(f.name)){log('Đang giải nén '+f.name+'…');const n=await extractZip(f,S.cur.handle,x=>log('  giải nén: '+x));log(`OK ${f.name}: ${n.length} file`,'ok')}
+      else{log('Đang chép '+f.name+' ('+mb(f.size)+')…');await writeFileTo(S.cur.handle,f.name,f.stream());log('OK '+f.name,'ok')}
+    }
     catch(e){log('Lỗi '+f.name+': '+e.message,'err')}
   }
   await scan();
